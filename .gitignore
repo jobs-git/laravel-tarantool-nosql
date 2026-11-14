@@ -1,0 +1,14 @@
+# Dependencies
+/vendor/
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Testing and Coverage
+/build/
+.phpunit.result.cache
+coverage/

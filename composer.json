@@ -1,0 +1,17 @@
+{
+    "name": "local/laravel-tarantool-nosql",
+    "description": "High-performance NoSQL Tarantool database driver for Laravel Eloquent",
+    "version": "0.0.0",
+    "type": "library",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Tarantool\\Nosql\\": "src/Tarantool/"
+        }
+    },
+    "require": {
+        "php": "^8.1",
+        "illuminate/database": "^10.0|^11.0|^12.0",
+        "tarantool/client": "^0.9.0|^0.10|^0.11"
+    }
+}
