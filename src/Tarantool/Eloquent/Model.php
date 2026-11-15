@@ -26,8 +26,11 @@ abstract class Model extends BaseModel
 
         $instance = new static();
 
-        // 1. Get the connection name, falling back to 'tarantool'
-        $connectionName = 'tarantool';
+        // 1. Dynamically resolve connection name from model property, 
+        //    runtime override, or fallback to 'tarantool'
+        $connectionName = property_exists($instance, 'connection') && $instance->connection 
+            ? $instance->connection 
+            : (static::$connection ?? 'tarantool');
 
         // 2. Get the connection configuration safely
         $config = config("database.connections.{$connectionName}", []);
@@ -39,14 +42,13 @@ abstract class Model extends BaseModel
 
         if ($dbPrefix) {
             $prefixString = "{$dbPrefix}_";
-            // Strip any existing prefix first to avoid duplication, then prepend it cleanly
             $unprefixedTable = str_starts_with($table, $prefixString) ? substr($table, strlen($prefixString)) : $table;
             $spaceName = "{$prefixString}{$unprefixedTable}";
         }
         
         $builder = new Builder(
             app("tarantool.connection.{$connectionName}"),
-            $spaceName, // <-- Must be $spaceName, not $table
+            $spaceName,
             $instance->getKeyName(),
             $instance->schema ?? []
         );

@@ -1,10 +1,11 @@
 <?php
 
-namespace Tarantool\Nosql\Migration;
+namespace Tarantool\Nosql\Migrations;
 
 use Illuminate\Database\Migrations\Migration as BaseMigration;
 
 abstract class Migration extends BaseMigration
 {
-    // Shared Tarantool migration helpers or lifecycle methods can go here
+    abstract public function up(): void;
+    abstract public function down(): void;
 }

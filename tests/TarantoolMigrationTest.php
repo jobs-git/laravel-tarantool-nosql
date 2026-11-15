@@ -9,7 +9,7 @@ class CreateUserProfilesTable {
     public function up()
     {
         Schema::create('user_profiles', function (Blueprint $table) {
-            $table->id('id')->primary();
+            $table->id('id');
             $table->string('bio')->nullable();
             $table->integer('age')->default(18);
         });

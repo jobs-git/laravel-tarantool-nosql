@@ -11,7 +11,7 @@ class Schema
         // Get the database name/namespace from  configuration
         $database = config('database.connections.tarantool.database', '');
         
-        // If a database is configured, qualify it with a dot (e.g. "my_db.data")
+        // If a database is configured, qualify it with a _ (e.g. "mydb_data")
         // Otherwise, fall back to just the table name
         $spaceName = $database ? "{$database}_{$table}" : $table;
 

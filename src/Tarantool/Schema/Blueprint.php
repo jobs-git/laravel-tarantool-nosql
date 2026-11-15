@@ -18,12 +18,14 @@ class Blueprint
     }
 
     // --- Primary & IDs ---
-    public function id(string $column = 'id'): self
+public function id(string $column = 'id'): self
     {
         if ($this->primaryKeyDefined) {
             throw new \LogicException("A primary key has already been defined for this space.");
         }
         $this->primaryKey = $column;
+        $this->primaryKeyDefined = true;
+        
         $this->columns[] = [
             'name' => $column,
             'type' => 'unsigned',
@@ -39,6 +41,8 @@ class Blueprint
             throw new \LogicException("A primary key has already been defined for this space.");
         }
         $this->primaryKey = $column;
+        $this->primaryKeyDefined = true;
+
         // Tarantool natively supports uuid format type since v2.4+
         $this->columns[] = [
             'name' => $column,
@@ -222,12 +226,14 @@ class Blueprint
         if ($this->primaryKeyDefined) {
             throw new \LogicException("A primary key has already been defined for this space.");
         }
+        
         if ($column !== null) {
             $this->primaryKey = $column;
         } elseif ($this->lastColumn !== null && isset($this->columns[$this->lastColumn])) {
-            // If called fluently without arguments (e.g., $table->uuid('id')->primary())
             $this->primaryKey = $this->columns[$this->lastColumn]['name'];
         }
+        
+        $this->primaryKeyDefined = true;
         return $this;
     }
 
