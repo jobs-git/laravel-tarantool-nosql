@@ -3,23 +3,33 @@
 namespace Tarantool\Nosql;
 
 use Illuminate\Support\ServiceProvider as BaseServiceProvider;
+use Tarantool\Nosql\Console\Commands\Migrate;
+use Tarantool\Client\Client;
 
 class ServiceProvider extends BaseServiceProvider
 {
     public function register()
     {
-        // 1. Bind the low-level Tarantool client singleton
-        $this->app->singleton('tarantool.connection.tarantool', function ($app) {
-            $config = $app['config']['database.connections.tarantool'] ?? [];
-            
-            return \Tarantool\Client\Client::fromOptions([
-                'uri'      => "tcp://" . ($config['host'] ?? '127.0.0.1') . ":" . ($config['port'] ?? 3301),
-                'username' => $config['username'] ?? 'admin',
-                'password' => $config['password'] ?? '',
-            ]);
-        });
+        // Dynamically register container bindings for ALL configured Tarantool connections
+        $connections = array_keys(config('database.connections', []));
 
-        // 2. Register 'tarantool' as a native driver in Laravel's DatabaseManager early
+        foreach ($connections as $name) {
+            $driver = config("database.connections.{$name}.driver");
+
+            if ($driver === 'tarantool') {
+                $this->app->singleton("tarantool.connection.{$name}", function ($app) use ($name) {
+                    $config = $app['config']["database.connections.{$name}"] ?? [];
+                    
+                    return Client::fromOptions([
+                        'uri'      => "tcp://" . ($config['host'] ?? '127.0.0.1') . ":" . ($config['port'] ?? 3301),
+                        'username' => $config['username'] ?? 'admin',
+                        'password' => $config['password'] ?? '',
+                    ]);
+                });
+            }
+        }
+
+        // Register 'tarantool' as a native driver in Laravel's DatabaseManager
         $this->app->resolving('db', function ($db) {
             $db->extend('tarantool', function ($config, $name) {
                 $config['name'] = $name;
@@ -30,6 +40,10 @@ class ServiceProvider extends BaseServiceProvider
 
     public function boot()
     {
-        // Package booting tasks (if any) go here
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                Migrate::class, // Fixed class name reference
+            ]);
+        }
     }
 }
