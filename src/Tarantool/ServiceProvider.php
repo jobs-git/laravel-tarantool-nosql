@@ -19,9 +19,21 @@ class ServiceProvider extends BaseServiceProvider
             if ($driver === 'tarantool') {
                 $this->app->singleton("tarantool.connection.{$name}", function ($app) use ($name) {
                     $config = $app['config']["database.connections.{$name}"] ?? [];
+                    $host = $config['host'] ?? '127.0.0.1';
+
+                    // Determine URI based on TCP vs Unix socket format
+                    if (str_starts_with($host, 'unix://')) {
+                        $uri = $host;
+                    } elseif (str_starts_with($host, '/')) {
+                        $uri = 'unix://' . $host;
+                    } elseif (str_starts_with($host, 'unix/')) {
+                        $uri = 'unix:///' . ltrim(str_replace('unix/', '', $host), '/');
+                    } else {
+                        $uri = "tcp://{$host}:" . ($config['port'] ?? 3301);
+                    }
                     
                     return Client::fromOptions([
-                        'uri'      => "tcp://" . ($config['host'] ?? '127.0.0.1') . ":" . ($config['port'] ?? 3301),
+                        'uri'      => $uri,
                         'username' => $config['username'] ?? 'admin',
                         'password' => $config['password'] ?? '',
                     ]);
@@ -42,7 +54,7 @@ class ServiceProvider extends BaseServiceProvider
     {
         if ($this->app->runningInConsole()) {
             $this->commands([
-                Migrate::class, // Fixed class name reference
+                Migrate::class,
             ]);
         }
     }
