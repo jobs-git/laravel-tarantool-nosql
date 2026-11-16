@@ -56,6 +56,18 @@ trait HasTarantool
      */
     public function __call($method, $parameters)
     {
+        $safeInMemoryMethods = [
+            'hydrate',
+            'newCollection',
+            'newFromBuilder',
+            'qualifyColumn',
+            'qualifyColumns',
+        ];
+
+        if (in_array($method, $safeInMemoryMethods, true)) {
+            return parent::__call($method, $parameters);
+        }
+
         throw new \BadMethodCallException(
             "Method [" . static::class . "::{$method}] cannot be called dynamically or on an instance. Use static context [ClassName::{$method}()] instead."
         );
