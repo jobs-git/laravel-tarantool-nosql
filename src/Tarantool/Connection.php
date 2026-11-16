@@ -26,6 +26,14 @@ class Connection extends BaseConnection
         return $this->client;
     }
 
+    /**
+     * Evaluate raw Lua expression against the Tarantool server.
+     */
+    public function evaluate(string $expression, array $parameters = [])
+    {
+        return $this->client->evaluate($expression, ...$parameters);
+    }
+
     public function getPdo() { return null; }
     public function getReadPdo() { return null; }
 
@@ -36,7 +44,6 @@ class Connection extends BaseConnection
     {
         $database = $this->getConfig('database') ?? '';
         
-        // Enforce idempotent prefixing here at the connection level
         $spaceName = $table;
         if ($database) {
             $prefixString = "{$database}_";
