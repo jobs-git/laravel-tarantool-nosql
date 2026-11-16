@@ -252,3 +252,46 @@ test('it can store and retrieve native datetime values seamlessly', function () 
     expect($user['created_at'])->toBeInstanceOf(DateTimeImmutable::class);
     expect($user['created_at']->format('Y-m-d H:i:s'))->toBe('2026-06-06 12:00:00');
 });
+
+
+test('it can read record attributes via both object property (->) and array key ([]) syntax', function () {
+    $created = TestUser::create([
+        'id' => 1101,
+        'name' => 'Sarah Connor',
+        'email' => 'sarah@resistance.org',
+    ]);
+
+    $fetched = TestUser::where(['id' => 1101])->first();
+
+    // Read via object property (->)
+    expect($created->id)->toBe(1101)
+        ->and($fetched->id)->toBe(1101)
+        ->and($fetched->name)->toBe('Sarah Connor')
+        ->and($fetched->email)->toBe('sarah@resistance.org')
+        // Read via array key ([])
+        ->and($fetched['id'])->toBe(1101)
+        ->and($fetched['name'])->toBe('Sarah Connor')
+        ->and($fetched['email'])->toBe('sarah@resistance.org');
+});
+
+test('it throws an error when attempting assignment on a returned record', function () {
+    TestUser::create([
+        'id' => 1102,
+        'name' => 'John Connor',
+        'email' => 'john@resistance.org',
+    ]);
+
+    $user = TestUser::where(['id' => 1102])->first();
+
+    // Block existing column assignment ($user->name = val)
+    expect(fn () => $user->name = 'Mutated Name')
+        ->toThrow(\RuntimeException::class, 'Returned records are read-only');
+
+    // Block arbitrary property assignment ($user->asdfasdf = val)
+    expect(fn () => $user->asdfasdf = 'val')
+        ->toThrow(\RuntimeException::class, 'Returned records are read-only');
+
+    // Block array key assignment ($user['name'] = val)
+    expect(fn () => $user['name'] = 'Mutated Name')
+        ->toThrow(\RuntimeException::class, 'Returned records are read-only');
+});

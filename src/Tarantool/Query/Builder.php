@@ -287,7 +287,7 @@ class Builder
     /**
      * Insert a new record using positional schema mapping.
      */
-    public function create(array $attributes): array
+    public function create(array $attributes): ReadOnlyRecord
     {
         $space = $this->connection->getTarantoolClient()->getSpace($this->table);
 
@@ -325,7 +325,7 @@ class Builder
     /**
      * Convert a raw numerical Tarantool tuple back into an associative array.
      */
-    protected function tupleToRow(array $tuple): array
+    protected function tupleToRow(array $tuple): ReadOnlyRecord
     {
         $row = [];
         foreach ($tuple as $index => $value) {
@@ -337,6 +337,29 @@ class Builder
             $row[$this->schema[$index]] = $value;
         }
 
-        return $row;
+        return new ReadOnlyRecord($row);
+    }
+}
+
+class ReadOnlyRecord extends \ArrayObject
+{
+    public function __construct(array $input = [])
+    {
+        parent::__construct($input, \ArrayObject::ARRAY_AS_PROPS);
+    }
+
+    public function offsetSet(mixed $key, mixed $value): void
+    {
+        throw new \RuntimeException(
+            "Tarantool strict standard enforced: Returned records are read-only. " .
+            "Cannot mutate '{$key}' directly; use Model::where(['id' => \$id])->update([...])."
+        );
+    }
+
+    public function offsetUnset(mixed $key): void
+    {
+        throw new \RuntimeException(
+            "Tarantool strict standard enforced: Returned records are read-only. Cannot unset '{$key}'."
+        );
     }
 }
