@@ -213,7 +213,7 @@ public function id(string $column = 'id'): self
         if ($this->lastColumn !== null && isset($this->columns[$this->lastColumn])) {
             $colName = $this->columns[$this->lastColumn]['name'];
             $this->indexes[] = [
-                'name' => $colName . '_idx',
+                'name' => $colName,
                 'field' => $colName,
                 'unique' => $unique
             ];
