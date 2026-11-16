@@ -4,6 +4,8 @@ namespace Tarantool\Nosql;
 
 use Illuminate\Database\Connection as BaseConnection;
 use Tarantool\Client\Client;
+use Tarantool\Client\Packer\PurePacker;
+use Tarantool\Nosql\Support\DateTimeExtension;
 use Tarantool\Nosql\Query\Builder;
 
 class Connection extends BaseConnection
@@ -13,12 +15,16 @@ class Connection extends BaseConnection
     public function __construct(array $config, $name = '')
     {
         parent::__construct(null, $name, '', $config);
-        
+
+        $uri = "tcp://" . ($config['host'] ?? '127.0.0.1') . ":" . ($config['port'] ?? 3301);
+
+        $packer = PurePacker::fromExtensions(new DateTimeExtension());
+
         $this->client = Client::fromOptions([
-            'uri' => "tcp://{$config['host']}:{$config['port']}",
+            'uri'      => $uri,
             'username' => $config['username'] ?? null,
             'password' => $config['password'] ?? null,
-        ]);
+        ], $packer);
     }
 
     public function getTarantoolClient(): Client
@@ -26,9 +32,6 @@ class Connection extends BaseConnection
         return $this->client;
     }
 
-    /**
-     * Evaluate raw Lua expression against the Tarantool server.
-     */
     public function evaluate(string $expression, array $parameters = [])
     {
         return $this->client->evaluate($expression, ...$parameters);
@@ -37,13 +40,10 @@ class Connection extends BaseConnection
     public function getPdo() { return null; }
     public function getReadPdo() { return null; }
 
-    /**
-     * Return our custom Tarantool query builder instance.
-     */
     public function table($table, $as = null, string $primaryKey = 'id', array $schema = [])
     {
         $database = $this->getConfig('database') ?? '';
-        
+
         $spaceName = $table;
         if ($database) {
             $prefixString = "{$database}_";

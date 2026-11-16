@@ -212,3 +212,43 @@ test('it throws an exception when attempting to update using any range operator'
     expect(fn () => TestUser::where(['id' => ['<=' => 801]])->update(['name' => 'Blocked']))
         ->toThrow(\RuntimeException::class, 'Updates can only be performed using exact-match equality');
 });
+
+use DateTimeImmutable;
+
+class TestUserWithTimestamp extends Model {
+    protected $table = 'users';
+    protected $primaryKey = 'id';
+    public $incrementing = false;
+    public $timestamps = false;
+
+    public array $schema = ['id', 'name', 'email', 'created_at'];
+}
+
+test('it can store and retrieve native datetime values seamlessly', function () {
+    Capsule::connection()->evaluate("
+        local space = box.space['app_users']
+        if space ~= nil then space:drop() end
+    ");
+
+    Schema::create('users', function (Blueprint $table) {
+        $table->id('id');
+        $table->string('name');
+        $table->string('email')->nullable();
+        $table->timestamp('created_at')->nullable(); // Changed from datetime() to timestamp()
+    });
+
+    $now = new DateTimeImmutable('2026-06-06 12:00:00');
+
+    TestUserWithTimestamp::create([
+        'id' => 901,
+        'name' => 'Terminator',
+        'email' => 't800@skynet.org',
+        'created_at' => $now,
+    ]);
+
+    $user = TestUserWithTimestamp::where(['id' => 901])->first();
+
+    expect($user['name'])->toBe('Terminator');
+    expect($user['created_at'])->toBeInstanceOf(DateTimeImmutable::class);
+    expect($user['created_at']->format('Y-m-d H:i:s'))->toBe('2026-06-06 12:00:00');
+});
