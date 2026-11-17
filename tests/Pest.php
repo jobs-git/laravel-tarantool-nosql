@@ -56,12 +56,6 @@ $capsule->getDatabaseManager()->extend('tarantool', function ($config, $name) {
     return new Connection($config);
 });
 
-// if (!Connection::hasMacro('evaluate')) {
-//     Connection::macro('evaluate', function (string $expression) {
-//         return $this->client->evaluate($expression);
-//     });
-// }
-
 $capsule->addConnection([
     'driver'    => 'tarantool',
     'host'      => '127.0.0.1',

@@ -309,11 +309,29 @@ class Builder
     /**
      * Delete a record directly using its primary key (runtime execution guard).
      */
-    public function delete($_pk)
+    public function delete()
     {
+        // 1. Prevent unbounded deletes (blanket table wipes)
+        if (empty($this->wheres)) {
+            throw new \RuntimeException(
+                "Tarantool strict standard enforced: Unbounded deletes are strictly prohibited. " .
+                "You must specify a where() condition targeting a primary key."
+            );
+        }
+
+        // 2. Extract and validate the primary key from the where clauses
+        // (Assuming your primary key field is 'id' or you can look it up dynamically)
+        $_pk = null;
+        foreach ($this->wheres as $where) {
+            if (($where['column'] ?? null) === 'id' && ($where['operator'] ?? '=') === '=') {
+                $_pk = $where['value'];
+                break;
+            }
+        }
+
         if (empty($_pk)) {
             throw new \RuntimeException(
-                "Tarantool delete() requires a non-empty primary key argument to prevent accidental data loss."
+                "Tarantool delete() requires an exact-match primary key equality condition in the where() clause."
             );
         }
 
