@@ -295,3 +295,60 @@ test('it throws an error when attempting assignment on a returned record', funct
     expect(fn () => $user['name'] = 'Mutated Name')
         ->toThrow(\RuntimeException::class, 'Returned records are read-only');
 });
+
+class TestUserAutoIncrement extends Model
+{
+    protected $table = 'users';
+    protected $primaryKey = 'id';
+    public $incrementing = true;
+    public $timestamps = false;
+
+    public array $schema = ['id', 'name', 'email'];
+}
+
+test('it autoincrements id when id is omitted via id()', function () {
+    $first = TestUserAutoIncrement::create([
+        'name' => 'Auto One',
+        'email' => 'auto1@test.org',
+    ]);
+
+    $second = TestUserAutoIncrement::create([
+        'name' => 'Auto Two',
+        'email' => 'auto2@test.org',
+    ]);
+
+    $third = TestUserAutoIncrement::create([
+        'name' => 'Auto Three',
+        'email' => 'auto3@test.org',
+    ]);
+
+    expect($first->id)->toBe(1);
+    expect($second->id)->toBe(2);
+    expect($third->id)->toBe(3);
+
+    $fetched = TestUserAutoIncrement::where(['id' => 2])->first();
+    expect($fetched['name'])->toBe('Auto Two');
+});
+
+test('it autoincrements id for unsignedInteger primary with explicit autoIncrement()', function () {
+    Capsule::connection()->evaluate("
+        local space = box.space['app_users']
+        if space ~= nil then space:drop() end
+    ");
+
+    Schema::create('users', function (Blueprint $table) {
+        $table->unsignedInteger('id')->primary()->autoIncrement();
+        $table->string('name');
+        $table->string('email')->nullable();
+    });
+
+    $user = TestUserAutoIncrement::create([
+        'name' => 'Explicit Auto',
+        'email' => 'explicit@test.org',
+    ]);
+
+    expect($user->id)->toBe(1);
+
+    $fetched = TestUserAutoIncrement::where(['id' => 1])->first();
+    expect($fetched['name'])->toBe('Explicit Auto');
+});

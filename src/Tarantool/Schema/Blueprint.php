@@ -11,20 +11,26 @@ class Blueprint
     protected string $engine = 'vinyl';
     protected ?int $lastColumn = null;
     protected bool $primaryKeyDefined = false;
+    protected bool $autoIncrement = false;
 
     public function __construct(string $spaceName)
     {
         $this->spaceName = $spaceName;
     }
-
+    public function autoIncrement(): self
+    {
+        $this->autoIncrement = true;
+        return $this;
+    }
     // --- Primary & IDs ---
-public function id(string $column = 'id'): self
+    public function id(string $column = 'id'): self
     {
         if ($this->primaryKeyDefined) {
             throw new \LogicException("A primary key has already been defined for this space.");
         }
         $this->primaryKey = $column;
         $this->primaryKeyDefined = true;
+        $this->autoIncrement = true;
         
         $this->columns[] = [
             'name' => $column,
@@ -261,6 +267,12 @@ public function id(string $column = 'id'): self
         }
         $primaryFieldType = $this->columns[$primaryFieldIndex - 1]['type'];
 
+        if ($this->autoIncrement && ! in_array($primaryFieldType, ['unsigned', 'integer'])) {
+            throw new \LogicException("Auto-increment requires an integer/unsigned primary key.");
+        }
+
+        $sequenceOption = $this->autoIncrement ? ",\n                    sequence = true" : "";
+
         // Build secondary index scripts
         $indexScripts = [];
         foreach ($this->indexes as $idx) {
@@ -292,7 +304,7 @@ public function id(string $column = 'id'): self
                 s:create_index('primary', {
                     type = 'TREE',
                     parts = { { field = %d, type = '%s' } },
-                    if_not_exists = true
+                    if_not_exists = true%s
                 })
                 s:format({ %s })
                 %s
@@ -303,6 +315,7 @@ public function id(string $column = 'id'): self
             $this->engine, 
             $primaryFieldIndex,
             $primaryFieldType,
+            $sequenceOption,
             $formatLua, 
             $secondaryIndexesLua
         );
