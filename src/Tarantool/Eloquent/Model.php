@@ -22,6 +22,24 @@ abstract class Model extends BaseModel
      */
     public static function __callStatic($method, $parameters)
     {
+        // FIXED: in-memory methods must NOT go to Builder.
+        // Same safe list as __call, but for static context.
+        // Without this, static::hydrate() is forwarded to Builder::hydrate() which does not exist.
+        $safeInMemoryMethods = [
+            'hydrate',
+            'newCollection',
+            'newFromBuilder',
+            'qualifyColumn',
+            'qualifyColumns',
+            'getMorphClass',
+            'getKey',
+        ];
+
+        if (in_array($method, $safeInMemoryMethods, true)) {
+            $instance = new static();
+            return $instance->$method(...$parameters);
+        }
+
         static::validateTarantoolConfig();
 
         $instance = new static();
@@ -67,6 +85,8 @@ abstract class Model extends BaseModel
             'newFromBuilder',
             'qualifyColumn',
             'qualifyColumns',
+            'getMorphClass',
+            'getKey',
         ];
 
         if (in_array($method, $safeInMemoryMethods, true)) {
