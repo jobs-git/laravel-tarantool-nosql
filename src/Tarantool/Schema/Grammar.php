@@ -37,6 +37,44 @@ class Grammar extends BaseGrammar
         };
     }
 
+
+    public function compileIndex(Blueprint $blueprint, Fluent $command): string
+    {
+        $space = $this->spaceName($blueprint);
+        $columns = $blueprint->getColumns();
+
+        $indexColumns = (array) $command->columns;
+
+        // Single column -> index name must be the column name for Builder::where('email')
+        // Composite -> keep Laravel's generated name
+        // Explicit custom name like $table->index('email', 'my_idx') -> keep it
+        $indexName = $command->index;
+        $autoName = $blueprint->getTable() . '_' . implode('_', $indexColumns) . '_index';
+        $autoUniqueName = $blueprint->getTable() . '_' . implode('_', $indexColumns) . '_unique';
+
+        if (count($indexColumns) === 1 && ($indexName === $autoName || $indexName === $autoUniqueName)) {
+            $indexName = $indexColumns[0];
+        }
+
+        $parts = [];
+        foreach ($indexColumns as $colName) {
+            $idx = collect($columns)->search(fn ($c) => $c->get('name') === $colName);
+            if ($idx === false) continue;
+            $col = $columns[$idx];
+            $parts[] = '{' . ($idx + 1) . ", '{$this->typeFor($col)}'}";
+        }
+
+        $unique = !empty($command->unique) ? 'true' : 'false';
+
+        return "box.space['{$space}']:create_index('{$indexName}', {type='tree', unique={$unique}, parts={" . implode(',', $parts) . "}, if_not_exists=true})";
+    }
+
+    public function compileUnique(Blueprint $blueprint, Fluent $command): string
+    {
+        $command->unique = true;
+        return $this->compileIndex($blueprint, $command);
+    }
+
     public function compileCreate(Blueprint $blueprint, Fluent $command): array
     {
         $space = $this->spaceName($blueprint);
