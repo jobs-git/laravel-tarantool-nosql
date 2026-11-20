@@ -352,3 +352,71 @@ test('it autoincrements id for unsignedInteger primary with explicit autoIncreme
     $fetched = TestUserAutoIncrement::where(['id' => 1])->first();
     expect($fetched['name'])->toBe('Explicit Auto');
 });
+
+test('it can delete records via explicit-schema model', function () {
+    TestUser::create([
+        'id' => 1201,
+        'name' => 'To Delete',
+        'email' => 'delete@test.org',
+    ]);
+
+    TestUser::create([
+        'id' => 1202,
+        'name' => 'To Keep',
+        'email' => 'keep@test.org',
+    ]);
+
+    // Delete by PK only
+    TestUser::where(['id' => 1201])->delete();
+
+    expect(TestUser::where(['id' => 1201])->first())->toBeNull();
+
+    // Other record still exists
+    $kept = TestUser::where(['id' => 1202])->first();
+    expect($kept['name'])->toBe('To Keep');
+});
+
+test('it throws an exception when attempting to delete without a where clause', function () {
+    expect(fn () => TestUser::limit(1)->delete())
+        ->toThrow(\RuntimeException::class, 'Unbounded deletes are strictly prohibited');
+});
+
+test('it throws an exception when attempting to delete using a non-primary key', function () {
+    TestUser::create([
+        'id' => 1203,
+        'name' => 'Non PK Delete',
+        'email' => 'nonpk@test.org',
+    ]);
+
+    expect(fn () => TestUser::where(['email' => 'nonpk@test.org'])->delete())
+        ->toThrow(\RuntimeException::class, 'requires an exact-match primary key');
+
+    // Record must still exist, delete was blocked
+    expect(TestUser::where(['id' => 1203])->first()['name'])->toBe('Non PK Delete');
+});
+
+test('it throws an exception when attempting to delete using a range operator', function () {
+    TestUser::create([
+        'id' => 1204,
+        'name' => 'Range Delete',
+        'email' => 'range@test.org',
+    ]);
+
+    expect(fn () => TestUser::where(['id' => ['>=' => 1204]])->delete())
+        ->toThrow(\RuntimeException::class, 'requires an exact-match primary key');
+
+    expect(TestUser::where(['id' => 1204])->first()['name'])->toBe('Range Delete');
+});
+
+test('it does not throw when deleting a non-existent primary key', function () {
+    TestUser::create([
+        'id' => 1205,
+        'name' => 'Still Here',
+        'email' => 'still@test.org',
+    ]);
+
+    // Should not throw, just no-op in Tarantool
+    TestUser::where(['id' => 9999])->delete();
+
+    expect(TestUser::where(['id' => 1205])->first()['name'])->toBe('Still Here');
+});

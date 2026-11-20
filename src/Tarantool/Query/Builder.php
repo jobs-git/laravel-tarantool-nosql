@@ -320,20 +320,27 @@ class Builder
         }
 
         // 2. Extract and validate the primary key from the where clauses
-        // (Assuming your primary key field is 'id' or you can look it up dynamically)
-        $_pk = null;
-        foreach ($this->wheres as $where) {
-            if (($where['column'] ?? null) === 'id' && ($where['operator'] ?? '=') === '=') {
-                $_pk = $where['value'];
-                break;
-            }
-        }
+        // FIXED: wheres is keyed by column: ['id' => ['value' => ..., 'operator' => ...]]
+        // Use $this->primaryKey, not hardcoded 'id'
+        $rawPk = $this->wheres[$this->primaryKey] ?? null;
+        $operator = is_array($rawPk) ? ($rawPk['operator'] ?? '=') : '=';
+        $_pk = is_array($rawPk) ? ($rawPk['value'] ?? null) : $rawPk;
 
-        if (empty($_pk)) {
+        if ($operator !== '=') {
             throw new \RuntimeException(
                 "Tarantool delete() requires an exact-match primary key equality condition in the where() clause."
             );
         }
+
+        if ($_pk === null || $_pk === '') {
+            throw new \RuntimeException(
+                "Tarantool delete() requires an exact-match primary key equality condition in the where() clause."
+            );
+        }
+
+        // Ensure primary key is explicitly cast to integer to satisfy Tarantool's 'unsigned' index type
+        // Same as update()
+        $_pk = (int) $_pk;
 
         $space = $this->connection->getTarantoolClient()->getSpace($this->table);
 
