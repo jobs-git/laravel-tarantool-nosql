@@ -3,10 +3,13 @@
 namespace Tarantool\Nosql;
 
 use Illuminate\Database\Connection as BaseConnection;
+use Illuminate\Database\Schema\Builder as SchemaBuilder; // NEW
 use Tarantool\Client\Client;
 use Tarantool\Client\Packer\PurePacker;
-use Tarantool\Nosql\Support\DateTimeExtension;
 use Tarantool\Nosql\Query\Builder;
+use Tarantool\Nosql\Query\Processor; // NEW, simple name, no subfolder
+use Tarantool\Nosql\Schema\Grammar; // NEW, simple name, no subfolder
+use Tarantool\Nosql\Support\DateTimeExtension;
 
 class Connection extends BaseConnection
 {
@@ -15,6 +18,8 @@ class Connection extends BaseConnection
     public function __construct(array $config, $name = '')
     {
         parent::__construct(null, $name, '', $config);
+
+        $this->useDefaultSchemaGrammar();
 
         $uri = "tcp://" . ($config['host'] ?? '127.0.0.1') . ":" . ($config['port'] ?? 3301);
 
@@ -52,5 +57,38 @@ class Connection extends BaseConnection
         }
 
         return new Builder($this, $spaceName, $primaryKey, $schema);
+    }
+
+    // NEW, only these are added for Laravel Schema to work
+
+    public function getSchemaBuilder()
+    {
+        return new SchemaBuilder($this);
+    }
+
+    public function getDefaultSchemaGrammar()
+    {
+        return new Grammar($this);
+    }
+
+    public function getSchemaGrammar()
+    {
+        return $this->schemaGrammar;
+    }
+
+    public function getPostProcessor()
+    {
+        return new Processor();
+    }
+
+    public function statement($query, $bindings = [])
+    {
+        $this->client->evaluate($query);
+        return true;
+    }
+
+    public function unprepared($query)
+    {
+        return $this->statement($query);
     }
 }
