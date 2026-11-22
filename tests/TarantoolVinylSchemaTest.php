@@ -8,6 +8,7 @@ test('it creates vinyl spaces in an isolated ephemeral directory', function () {
     $spaceName = 'vinyl_test_space';
     
     Schema::create($spaceName, function (Blueprint $table) {
+        $table->engine = 'vinyl';
         $table->id('id');
         $table->string('name')->nullable();
     });
