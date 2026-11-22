@@ -5,6 +5,7 @@ namespace Tarantool\Nosql\Query;
 use Tarantool\Client\Schema\Criteria;
 use Tarantool\Client\Schema\Operations;
 use Tarantool\Nosql\Connection;
+use Tarantool\Nosql\ReadOnlyRecord;
 
 
 /**
@@ -363,28 +364,5 @@ class Builder
         }
 
         return new ReadOnlyRecord($row);
-    }
-}
-
-class ReadOnlyRecord extends \ArrayObject
-{
-    public function __construct(array $input = [])
-    {
-        parent::__construct($input, \ArrayObject::ARRAY_AS_PROPS);
-    }
-
-    public function offsetSet(mixed $key, mixed $value): void
-    {
-        throw new \RuntimeException(
-            "Tarantool strict standard enforced: Returned records are read-only. " .
-            "Cannot mutate '{$key}' directly; use Model::where(['id' => \$id])->update([...])."
-        );
-    }
-
-    public function offsetUnset(mixed $key): void
-    {
-        throw new \RuntimeException(
-            "Tarantool strict standard enforced: Returned records are read-only. Cannot unset '{$key}'."
-        );
     }
 }

@@ -7,6 +7,7 @@ namespace Tarantool\Nosql\Eloquent;
 use Illuminate\Database\Eloquent\Model as BaseModel;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Tarantool\Nosql\Query\Builder;
+use Tarantool\Nosql\ReadOnlyRecord;
 
 abstract class Model extends BaseModel
 {
@@ -111,18 +112,41 @@ abstract class Model extends BaseModel
      */
     public static function call(string $procedure, ...$arguments)
     {
-        $connectionName = static::$connection ?? 'tarantool';
-        $connection = app("tarantool.connection.{$connectionName}");
-
-        $client = $connection->getTarantoolClient();
-
-        if (count($arguments) === 1 && is_array($arguments[0])) {
-            $response = $client->call($procedure, $arguments[0]);
-        } else {
-            $response = $client->call($procedure, ...$arguments);
+        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $procedure)) {
+            throw new \InvalidArgumentException("Invalid procedure name: {$procedure}");
         }
 
-        return (array) $response;
+        $connectionName = static::$connection ?? 'tarantool';
+        $connection = app("tarantool.connection.{$connectionName}");
+        $client = $connection->getTarantoolClient();
+
+        $args = (count($arguments) === 1 && is_array($arguments[0]))
+            ? $arguments[0]
+            : $arguments;
+
+        $response = $client->call($procedure, $args);
+
+        // $response from call() is [ , , ... ] or [ scalar ]
+        // Normalize to same return as Builder: ReadOnlyRecord(s)
+        if (!is_array($response)) {
+            return $response;
+        }
+
+        // List of rows -> list of ReadOnlyRecord
+        if (isset($response[0]) && is_array($response[0])) {
+            return array_map(
+                fn ($row) => new ReadOnlyRecord(is_array($row) ? $row : ['value' => $row]),
+                $response
+            );
+        }
+
+        // Single row -> single ReadOnlyRecord
+        if (array_is_list($response) && count($response) > 0 && !is_array($response[0])) {
+            // scalar list like [1, 2, 3] from a proc that returns numbers - keep as array
+            return $response;
+        }
+
+        return new ReadOnlyRecord($response);
     }
     
     /**

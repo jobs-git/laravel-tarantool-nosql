@@ -4,11 +4,11 @@ namespace Tarantool\Nosql\Schema;
 
 class Blueprint
 {
+    public string $engine = 'memtx';
     protected string $spaceName;
     protected array $columns = [];
     protected array $indexes = [];
     protected string $primaryKey = 'id';
-    protected string $engine = 'memtx';
     protected ?int $lastColumn = null;
     protected bool $primaryKeyDefined = false;
     protected bool $autoIncrement = false;
