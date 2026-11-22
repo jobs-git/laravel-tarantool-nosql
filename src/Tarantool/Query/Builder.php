@@ -110,6 +110,7 @@ class Builder
      * Supports exact match: User::where(['status' => 'active'])
      * Supports operators: User::where(['age' => ['>=' => 18]])
      * Supports no-params for call(): User::where([])->call('procedure')
+     * Supports array param for call(): User::where(['declined_ids' => [5,6]])->call('find_closest')
      */
     public function where($conditions)
     {
@@ -139,14 +140,14 @@ class Builder
                 $opKey = array_key_first($value);
                 
                 // Check if it's a valid operator constraint (e.g. ['>=' => 18])
-                if ($opKey && in_array($opKey, $validOperators, true)) {
+                if ($opKey !== null && is_string($opKey) && in_array($opKey, $validOperators, true)) {
                     $operator = $opKey;
                     $value = $value[$opKey];
                 } else {
-                    // Otherwise, it's a forbidden multi-ID lookup (e.g. [601, 603])
-                    throw new \RuntimeException(
-                        "Tarantool strict standard enforced: Multi-ID / array-based lookups are strictly prohibited to prevent non-contiguous iteration."
-                    );
+                    // Array param for call(), e.g. declined_ids = [5,6] or []
+                    // DO NOT throw here - where() doesn't know if this is for call() or for bulk.
+                    // get() / update() / delete() will throw if you try to use it for bulk.
+                    // Keep $value as the whole array, operator stays '='
                 }
             }
 
@@ -183,6 +184,14 @@ class Builder
             // Extract value and operator safely
             $value = is_array($condition) ? $condition['value'] : $condition;
             $operator = is_array($condition) ? $condition['operator'] : '=';
+
+            // Intentional error stays here: select cannot do non-contiguous array lookup
+            // space:select can do bulk, but only consecutive via index, not random list [1,5,9]
+            if (is_array($value)) {
+                throw new \RuntimeException(
+                    "Tarantool strict standard enforced: Multi-ID / array-based lookups are strictly prohibited to prevent non-contiguous iteration."
+                );
+            }
 
             $indexPos = array_search($column, $this->schema, true);
             $isPrimary = ($column === $this->primaryKey || ($indexPos !== false && $indexPos === 0));
@@ -294,6 +303,14 @@ class Builder
         $column = array_key_first($this->wheres);
         $condition = $this->wheres[$column];
         $operator = is_array($condition) ? $condition['operator'] : '=';
+        $value = is_array($condition) ? $condition['value'] : $condition;
+
+        // Intentional error stays here: space:update is per-tuple, no bulk update
+        if (is_array($value)) {
+            throw new \RuntimeException(
+                "Tarantool strict standard enforced: Multi-ID / array-based lookups are strictly prohibited to prevent non-contiguous iteration."
+            );
+        }
 
         // STRICTNESS: Updates can only be performed using exact-match equality (=)
         if ($operator !== '=') {
@@ -386,6 +403,13 @@ class Builder
         $rawPk = $this->wheres[$this->primaryKey] ?? null;
         $operator = is_array($rawPk) ? ($rawPk['operator'] ?? '=') : '=';
         $_pk = is_array($rawPk) ? ($rawPk['value'] ?? null) : $rawPk;
+
+        // Intentional error stays here: delete is per-tuple, no bulk delete
+        if (is_array($_pk)) {
+            throw new \RuntimeException(
+                "Tarantool strict standard enforced: Multi-ID / array-based lookups are strictly prohibited to prevent non-contiguous iteration."
+            );
+        }
 
         if ($operator !== '=') {
             throw new \RuntimeException(
