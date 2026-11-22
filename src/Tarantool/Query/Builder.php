@@ -16,10 +16,14 @@ use Tarantool\Nosql\ReadOnlyRecord;
  * // Update multiple records (Mass update style - fast, skips events)
  * User::where(['status' => 'pending'])->update(['status' => 'active']);
  * 
- * // Call stored procedure with param names, returns column names
- * User::where(['id' => $id])->call('get_user');
- * User::where([])->call('get_all_active_users');
- * User::where(['lat' => $lat, 'lng' => $lng])->call('find_closest')->first();
+ * // Call stored procedure - call() picks procedure like on() picks connection
+ * // Read: 1 map input
+ * User::call('get_user')->where(['id' => $id])->first();
+ * User::call('get_all_active_users')->where([])->first();
+ * User::call('procedure')->where(['lat' => $lat, 'lng' => $lng])->first();
+ * User::on('tarantool')->call('procedure')->where(['lat' => $lat, 'lng' => $lng])->first();
+ * // Write: 2 maps input - search map + update map
+ * User::call('assign_closest')->where(['lat' => $lat, 'lng' => $lng])->update(['status' => 'assigned']);
  */
 
 class Builder
@@ -32,6 +36,8 @@ class Builder
     protected bool $whereCalled = false;
     protected ?int $limit = null;
     protected ?int $offset = null;
+    protected ?string $procedure = null;
+    protected static array $procedureSignatureCache = [];
 
     public function __construct(
         Connection $connection,
@@ -92,16 +98,21 @@ class Builder
 
     /**
      * Get the first matching record.
-     * This is Builder::first() - runs get() -> $space->select()
+     * If call() was used: runs procedure, returns first ReadOnlyRecord.
+     * Otherwise: runs get() -> $space->select()
      */
     public function first($columns = ['*'])
     {
         // Enforce limit of 1 for single record lookups if not already set
+        // Ignored when procedure is set - procedure does its own limiting
         if ($this->limit === null) {
             $this->limit(1);
         }
 
         $results = $this->get($columns);
+        if ($results instanceof \Illuminate\Support\Collection) {
+            return $results->first();
+        }
         return $results[0] ?? null;
     }
 
@@ -109,8 +120,8 @@ class Builder
      * Set query constraints strictly using an associative array.
      * Supports exact match: User::where(['status' => 'active'])
      * Supports operators: User::where(['age' => ['>=' => 18]])
-     * Supports no-params for call(): User::where([])->call('procedure')
-     * Supports array param for call(): User::where(['declined_ids' => [5,6]])->call('find_closest')
+     * Supports no-params for call(): User::call('proc')->where([])->first()
+     * Supports array param for call(): User::call('find_closest')->where(['declined_ids' => [5,6]])->first()
      */
     public function where($conditions)
     {
@@ -162,10 +173,48 @@ class Builder
     }
 
     /**
-     * Execute the query and return matching rows using positional mapping.
+     * Execute the query and return matching rows.
+     * If call() was used: runs procedure with 1 map, returns Collection.
+     * Otherwise: $space->select() with single index condition.
      */
     public function get($columns = ['*'])
     {
+        // Procedure path: call -> where -> get() / first()
+        if ($this->procedure !== null) {
+            $this->validateProcedure($this->procedure, 1);
+
+            if (!$this->whereCalled) {
+                throw new \RuntimeException(
+                    "Tarantool strict standard enforced: call() requires where() after it. " .
+                    "Use Model::call('procedure')->where([...])->first() or ->where([])->first()"
+                );
+            }
+
+            $params = [];
+            foreach ($this->wheres as $column => $cond) {
+                $params[$column] = is_array($cond) ? $cond['value'] : $cond;
+            }
+
+            $client = $this->connection->getTarantoolClient();
+            // 1 map: where() map
+            // $client->call('find_closest', ['latitude'=>...])
+            // Lua: function(params)
+            $response = $client->call($this->procedure, $params);
+
+            if (!is_array($response) || $response === []) {
+                return collect([]);
+            }
+
+            $returns = array_is_list($response) ? $response : [$response];
+            $mapped = array_map(function ($row) {
+                if (!is_array($row)) return $row;
+                return new ReadOnlyRecord($row);
+            }, $returns);
+
+            return collect($mapped);
+        }
+
+        // Normal select path
         $space = $this->connection->getTarantoolClient()->getSpace($this->table);
         $rows = [];
 
@@ -232,10 +281,10 @@ class Builder
     }
 
     /**
-     * Call a stored procedure.
-     * where() provides param names, procedure returns column names.
-     * No schema enforcement - procedure is source of truth.
-     * Returns Collection so ->first() after call() is Collection::first().
+     * Pick the stored procedure, like on() picks the connection.
+     * Does NOT execute. Chain where() after it, then first() / get() / update().
+     * Model::call('find_closest')->where([...])->first()
+     * Model::on('tarantool')->call('find_closest')->where([...])->first()
      */
     public function call(string $procedure)
     {
@@ -243,50 +292,147 @@ class Builder
             throw new \InvalidArgumentException("Invalid procedure name: {$procedure}");
         }
 
-        if (!$this->whereCalled) {
-            throw new \RuntimeException(
-                "Tarantool strict standard enforced: call() requires where() first. " .
-                "Use where(['param0' => \$val0])->call('procedure') or where([])->call('procedure')"
-            );
-        }
+        $this->procedure = $procedure;
+        return $this;
+    }
 
-        // where() already built the map, Builder just passes it through
-        $params = [];
-        foreach ($this->wheres as $column => $cond) {
-            $params[$column] = is_array($cond) ? $cond['value'] : $cond;
+    /**
+     * Validate that a procedure has the expected number of map params.
+     * Read (first/get): 1 map -> function(params)
+     * Write (update): 2 maps -> function(search, updates)
+     * Errors out if user implemented their own procedure in the wrong format.
+     */
+    protected function validateProcedure(string $procedure, int $expectedParams): void
+    {
+        if (isset(self::$procedureSignatureCache[$procedure])) {
+            $cached = self::$procedureSignatureCache[$procedure];
+            if ($cached['unknown'] ?? false) {
+                return;
+            }
+            $actual = $cached['nparams'];
+            $isVararg = $cached['isvararg'] ?? false;
+            if ($isVararg) {
+                return;
+            }
+            if ($actual !== $expectedParams) {
+                throw new \RuntimeException(
+                    "Stored procedure '{$procedure}' is in the wrong format. " .
+                    "Expected {$expectedParams} param(s) but it was defined with {$actual}. " .
+                    ($expectedParams === 1
+                        ? "For call->where->first() / get(), use: function(params)"
+                        : "For call->where->update(), use: function(search, updates)")
+                );
+            }
+            return;
         }
 
         $client = $this->connection->getTarantoolClient();
 
-        // PASS THE MAP - not ...array_values($params)
-        // where(['latitude'=>14.5]) -> $client->call('proc', ['latitude'=>14.5])
-        // -> Lua: function(params) with params.latitude = 14.5
-        // where([]) -> $client->call('proc', []) -> Lua gets empty table {}
-        $response = $client->call($procedure, $params);
+        $info = $client->evaluate("
+            local name = '{$procedure}'
+            -- 1. Global function defined in Lua file
+            local f = _G[name]
+            if f ~= nil then
+                local ok, info = pcall(debug.getinfo, f, 'u')
+                if ok and info ~= nil then
+                    return {exists = true, nparams = info.nparams, isvararg = info.isvararg}
+                end
+            end
+            -- 2. Stored function via box.schema.func.create({body=...})
+            -- Body is in _func space, parse function(params) from it
+            local t = box.space._func.index.name:get(name)
+            if t == nil then return {exists = false} end
+            local body = t[6] or t.body
+            if body == nil or body == '' then return {exists = true, unknown = true} end
+            local params_str = body:match('function%s*%(([^%)]*)%)')
+            if params_str == nil then return {exists = true, unknown = true} end
+            params_str = params_str:gsub('%s+', '')
+            if params_str == '' then return {exists = true, nparams = 0, isvararg = false} end
+            if params_str:find('%.%.%.') then return {exists = true, nparams = 0, isvararg = true} end
+            local count = 1
+            for _ in params_str:gmatch(',') do count = count + 1 end
+            return {exists = true, nparams = count, isvararg = false}
+        ");
 
-        if (!is_array($response)) {
-            $response = [$response];
+        $data = [];
+        if (is_array($info)) {
+            $data = $info[0] ?? $info;
+            if (!is_array($data)) {
+                $data = [];
+            }
         }
 
-        if ($response === []) {
-            return collect([]);
+        if (($data['exists'] ?? false) === false) {
+            throw new \RuntimeException("Stored procedure '{$procedure}' does not exist.");
         }
 
-        $returns = array_is_list($response) ? $response : [$response];
+        if (!empty($data['unknown'])) {
+            self::$procedureSignatureCache[$procedure] = ['unknown' => true];
+            return;
+        }
 
-        $mapped = array_map(function ($row) {
-            if (!is_array($row)) return $row;
-            return new ReadOnlyRecord($row);
-        }, $returns);
+        $actual = (int) ($data['nparams'] ?? 0);
+        $isVararg = !empty($data['isvararg']);
+        self::$procedureSignatureCache[$procedure] = ['nparams' => $actual, 'isvararg' => $isVararg];
 
-        return collect($mapped);
+        if ($isVararg) {
+            return;
+        }
+
+        if ($actual !== $expectedParams) {
+            throw new \RuntimeException(
+                "Stored procedure '{$procedure}' is in the wrong format. " .
+                "Expected {$expectedParams} param(s) but it was defined with {$actual}. " .
+                ($expectedParams === 1
+                    ? "For call->where->first() / get(), use: function(params)"
+                    : "For call->where->update(), use: function(search, updates)")
+            );
+        }
     }
 
     /**
      * Execute a strict exact-match update.
+     * If call() was used: search+update procedure, 2 maps, returns ReadOnlyRecord|null.
+     * Otherwise: per-tuple update, returns bool.
      */
-    public function update(array $values): bool
+    public function update(array $values): mixed
     {
+        // Procedure path: call -> where -> update()
+        if ($this->procedure !== null) {
+            $this->validateProcedure($this->procedure, 2);
+
+            if (!$this->whereCalled) {
+                throw new \RuntimeException(
+                    "Tarantool strict standard enforced: call() requires where() after it. " .
+                    "Use Model::call('procedure')->where([...])->update([...])"
+                );
+            }
+
+            if ($values === []) {
+                throw new \InvalidArgumentException("update() requires update values, e.g. update(['status' => 'assigned'])");
+            }
+
+            $searchParams = [];
+            foreach ($this->wheres as $column => $cond) {
+                $searchParams[$column] = is_array($cond) ? $cond['value'] : $cond;
+            }
+
+            $client = $this->connection->getTarantoolClient();
+            // 2 maps: where() map + update() map
+            // $client->call('assign_closest', ['latitude'=>...], ['status'=>'assigned'])
+            // Lua: function(search, updates)
+            $response = $client->call($this->procedure, $searchParams, $values);
+
+            if (!is_array($response) || $response === []) {
+                return null;
+            }
+
+            $row = array_is_list($response) ? $response[0] : $response;
+            if (!is_array($row)) return $row;
+            return new ReadOnlyRecord($row);
+        }
+
+        // Normal per-tuple update path
         if (empty($this->wheres)) {
             throw new \RuntimeException(
                 "Tarantool strict standard enforced: Unbounded updates are strictly prohibited. " .
@@ -386,9 +532,37 @@ class Builder
 
     /**
      * Delete a record directly using its primary key (runtime execution guard).
+     * If call() was used: procedure delete, 1 map.
      */
     public function delete()
     {
+        // Procedure path: call -> where -> delete()
+        if ($this->procedure !== null) {
+            $this->validateProcedure($this->procedure, 1);
+
+            if (!$this->whereCalled) {
+                throw new \RuntimeException(
+                    "Tarantool strict standard enforced: call() requires where() after it. " .
+                    "Use Model::call('procedure')->where([...])->delete()"
+                );
+            }
+
+            $params = [];
+            foreach ($this->wheres as $column => $cond) {
+                $params[$column] = is_array($cond) ? $cond['value'] : $cond;
+            }
+
+            $client = $this->connection->getTarantoolClient();
+            $response = $client->call($this->procedure, $params);
+
+            if (!is_array($response) || $response === []) {
+                return null;
+            }
+            $row = array_is_list($response) ? $response[0] : $response;
+            if (!is_array($row)) return $row;
+            return new ReadOnlyRecord($row);
+        }
+
         // 1. Prevent unbounded deletes (blanket table wipes)
         if (empty($this->wheres)) {
             throw new \RuntimeException(
