@@ -7,7 +7,6 @@ use Tarantool\Client\Schema\Operations;
 use Tarantool\Nosql\Connection;
 use Tarantool\Nosql\ReadOnlyRecord;
 
-
 /**
  * Standardized Database Query Examples:
  * 
@@ -16,8 +15,12 @@ use Tarantool\Nosql\ReadOnlyRecord;
  * 
  * // Update multiple records (Mass update style - fast, skips events)
  * User::where(['status' => 'pending'])->update(['status' => 'active']);
+ * 
+ * // Call stored procedure with param names, returns column names
+ * User::where(['id' => $id])->call('get_user');
+ * User::where([])->call('get_all_active_users');
+ * User::where(['lat' => $lat, 'lng' => $lng])->call('find_closest')->first();
  */
-
 
 class Builder
 {
@@ -26,6 +29,7 @@ class Builder
     protected string $primaryKey;
     protected array $schema;
     protected array $wheres = [];
+    protected bool $whereCalled = false;
     protected ?int $limit = null;
     protected ?int $offset = null;
 
@@ -88,6 +92,7 @@ class Builder
 
     /**
      * Get the first matching record.
+     * This is Builder::first() - runs get() -> $space->select()
      */
     public function first($columns = ['*'])
     {
@@ -104,10 +109,11 @@ class Builder
      * Set query constraints strictly using an associative array.
      * Supports exact match: User::where(['status' => 'active'])
      * Supports operators: User::where(['age' => ['>=' => 18]])
+     * Supports no-params for call(): User::where([])->call('procedure')
      */
     public function where($conditions)
     {
-        if (!empty($this->wheres)) {
+        if ($this->whereCalled) {
             throw new \BadMethodCallException(
                 "Tarantool strict standard enforced: Chaining multiple where() calls is not allowed. " .
                 "Pass all conditions inside a single associative array: User::where(['id' => 1, 'status' => 'active'])"
@@ -120,6 +126,9 @@ class Builder
                 "Use User::where(['id' => \$value]) instead of positional arguments."
             );
         }
+
+        // Mark as called even for where([]) - so call() knows where() was used
+        $this->whereCalled = true;
 
         $validOperators = ['>', '>=', '<', '<=', '='];
 
@@ -211,6 +220,57 @@ class Builder
         }
 
         return $rows;
+    }
+
+    /**
+     * Call a stored procedure.
+     * where() provides param names, procedure returns column names.
+     * No schema enforcement - procedure is source of truth.
+     * Returns Collection so ->first() after call() is Collection::first().
+     */
+    public function call(string $procedure)
+    {
+        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $procedure)) {
+            throw new \InvalidArgumentException("Invalid procedure name: {$procedure}");
+        }
+
+        if (!$this->whereCalled) {
+            throw new \RuntimeException(
+                "Tarantool strict standard enforced: call() requires where() first. " .
+                "Use where(['param0' => \$val0])->call('procedure') or where([])->call('procedure')"
+            );
+        }
+
+        // where() already built the map, Builder just passes it through
+        $params = [];
+        foreach ($this->wheres as $column => $cond) {
+            $params[$column] = is_array($cond) ? $cond['value'] : $cond;
+        }
+
+        $client = $this->connection->getTarantoolClient();
+
+        // PASS THE MAP - not ...array_values($params)
+        // where(['latitude'=>14.5]) -> $client->call('proc', ['latitude'=>14.5])
+        // -> Lua: function(params) with params.latitude = 14.5
+        // where([]) -> $client->call('proc', []) -> Lua gets empty table {}
+        $response = $client->call($procedure, $params);
+
+        if (!is_array($response)) {
+            $response = [$response];
+        }
+
+        if ($response === []) {
+            return collect([]);
+        }
+
+        $returns = array_is_list($response) ? $response : [$response];
+
+        $mapped = array_map(function ($row) {
+            if (!is_array($row)) return $row;
+            return new ReadOnlyRecord($row);
+        }, $returns);
+
+        return collect($mapped);
     }
 
     /**
