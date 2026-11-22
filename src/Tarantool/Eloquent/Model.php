@@ -124,7 +124,7 @@ abstract class Model extends BaseModel
             ? $arguments[0]
             : $arguments;
 
-        $response = $client->call($procedure, $args);
+        $response = $client->call($procedure, ...$args);
 
         // $response from call() is [ , , ... ] or [ scalar ]
         // Normalize to same return as Builder: ReadOnlyRecord(s)
