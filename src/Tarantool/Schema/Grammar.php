@@ -79,6 +79,8 @@ class Grammar extends BaseGrammar
     {
         $space = $this->spaceName($blueprint);
         $columns = $blueprint->getColumns();
+        // add this one line
+        $engine = $blueprint->engine ?? 'memtx';
 
         $format = [];
         foreach ($columns as $col) {
@@ -90,7 +92,7 @@ class Grammar extends BaseGrammar
         }
 
         $lua = [
-            "box.schema.space.create('{$space}', {if_not_exists=true})",
+            "box.schema.space.create('{$space}', {engine='{$engine}', if_not_exists=true})",
             "box.space['{$space}']:format({" . implode(',', $format) . "})",
         ];
 

@@ -8,7 +8,7 @@ class Blueprint
     protected array $columns = [];
     protected array $indexes = [];
     protected string $primaryKey = 'id';
-    protected string $engine = 'vinyl';
+    protected string $engine = 'memtx';
     protected ?int $lastColumn = null;
     protected bool $primaryKeyDefined = false;
     protected bool $autoIncrement = false;
