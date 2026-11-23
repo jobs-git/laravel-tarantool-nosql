@@ -24,6 +24,29 @@ use Tarantool\Nosql\ReadOnlyRecord;
  * User::on('tarantool')->call('procedure')->where(['lat' => $lat, 'lng' => $lng])->first();
  * // Write: 2 maps input - search map + update map
  * User::call('assign_closest')->where(['lat' => $lat, 'lng' => $lng])->update(['status' => 'assigned']);
+ *
+ * // Range select - ENABLED, returns many rows
+ * User::where(['created_at' => ['>=' => $ts]])->limit(20)->offset(40)->get();
+ * User::where(['score' => ['>' => 3]])->get(); // defaults to limit 1000
+ *
+ * // Multi-ID IN list - STILL BLOCKED, non-contiguous iteration
+ * // User::where(['id' => [1,4,10]])->get(); // throws
+ *
+ * // limit / offset for procedure - appended to the SAME 1 map, Lua ignores if unused
+ * User::call('list_orders')->where(['status' => 'active'])->limit(20)->offset(40)->get();
+ *
+ * // Ordering - STRICT: must be same column as where() for normal select
+ * User::where(['created_at' => ['<=' => $now]])->orderBy('created_at', 'desc')->first();
+ * User::where(['created_at' => ['>=' => $ts]])->orderByDesc('created_at')->limit(20)->get();
+ * // Procedure: order_by / order_dir appended to same 1 map, Lua ignores if unused
+ * User::call('list_orders')->where(['status' => 'active'])->orderBy('created_at', 'desc')->get();
+ *
+ * // Ordering - MISMATCHED 4: filter is right, order is wrong in Tarantool.
+ * // Tarantool only has EQ, REQ, GT, GE, LT, LE. GT/GE are asc, LT/LE are desc.
+ * // > + desc, >= + desc, < + asc, <= + asc have no single iterator for both filter and order.
+ * // For those 4: fetch all with filter iterator, array_reverse() in PHP, return all.
+ * // Slicing those 4 with limit()/offset() is unsupported and throws, because offset would skip from the wrong end.
+ * // Use a procedure if you need those 4 with limit/offset.
  */
 
 class Builder
@@ -36,7 +59,11 @@ class Builder
     protected bool $whereCalled = false;
     protected ?int $limit = null;
     protected ?int $offset = null;
+    protected bool $hasExplicitLimit = false;
+    protected bool $hasExplicitOffset = false;
     protected ?string $procedure = null;
+    protected ?string $orderBy = null;
+    protected string $orderDirection = 'asc';
     protected static array $procedureSignatureCache = [];
 
     public function __construct(
@@ -57,6 +84,7 @@ class Builder
     public function limit(int $value)
     {
         $this->limit = $value;
+        $this->hasExplicitLimit = true;
         return $this;
     }
 
@@ -74,6 +102,7 @@ class Builder
     public function offset(int $value)
     {
         $this->offset = $value;
+        $this->hasExplicitOffset = true;
         return $this;
     }
 
@@ -83,6 +112,49 @@ class Builder
     public function skip(int $value)
     {
         return $this->offset($value);
+    }
+
+    /**
+     * Order by the index you're selecting on.
+     * Normal select: $column MUST equal where() column, Tarantool can only
+     * order by the index used for select.
+     * Procedure: appended as order_by / order_dir to the same 1 map, Lua ignores if unused.
+     */
+    public function orderBy(string $column, string $direction = 'asc')
+    {
+        $direction = strtolower($direction);
+        if (!in_array($direction, ['asc', 'desc'], true)) {
+            throw new \InvalidArgumentException(
+                "Tarantool strict standard enforced: orderBy() direction must be 'asc' or 'desc', got '{$direction}'."
+            );
+        }
+
+        if ($this->orderBy !== null) {
+            throw new \BadMethodCallException(
+                "Tarantool strict standard enforced: Chaining multiple orderBy() calls is not allowed. " .
+                "A query can order by a single index only."
+            );
+        }
+
+        $this->orderBy = $column;
+        $this->orderDirection = $direction;
+        return $this;
+    }
+
+    /**
+     * Alias: orderBy($column, 'desc')
+     */
+    public function orderByDesc(string $column)
+    {
+        return $this->orderBy($column, 'desc');
+    }
+
+    /**
+     * Alias: orderBy($column, 'asc')
+     */
+    public function orderByAsc(string $column)
+    {
+        return $this->orderBy($column, 'asc');
     }
 
     /**
@@ -104,9 +176,11 @@ class Builder
     public function first($columns = ['*'])
     {
         // Enforce limit of 1 for single record lookups if not already set
-        // Ignored when procedure is set - procedure does its own limiting
+        // For call() path this becomes params['limit'] = 1, Lua may ignore it.
+        // For normal path this becomes Criteria limit 1.
+        // Set directly, not via limit(), so it does not count as explicit slicing.
         if ($this->limit === null) {
-            $this->limit(1);
+            $this->limit = 1;
         }
 
         $results = $this->get($columns);
@@ -173,9 +247,102 @@ class Builder
     }
 
     /**
+     * STRICT: No fallback to primary index. Ever.
+     * If column != primaryKey and no index named $column exists on the space,
+     * throw instead of silently using primary / full scan.
+     */
+    protected function assertIndexExists(string $column): void
+    {
+        if ($column === $this->primaryKey) {
+            return;
+        }
+
+        $client = $this->connection->getTarantoolClient();
+
+        $escapedTable = addslashes($this->table);
+        $escapedColumn = addslashes($column);
+
+        $info = $client->evaluate("return box.space['{$escapedTable}'].index['{$escapedColumn}'] ~= nil");
+        $exists = is_array($info) ? ($info[0] ?? $info) : $info;
+
+        if (! $exists) {
+            throw new \RuntimeException(
+                "Tarantool strict standard enforced: No index '{$column}' on space '{$this->table}'. " .
+                "Builder will NOT fallback to primary index '{$this->primaryKey}'. " .
+                "Add index '{$column}' on '{$this->table}' or use a procedure: " .
+                "Model::call('procedure')->where(['{$column}' => \$value])->first(). " .
+                "Tried: where(['{$column}' => ...])->get()/first()"
+            );
+        }
+    }
+
+    /**
+     * Get first part type of an index: 'unsigned', 'string', 'integer', 'number', etc.
+     * Returns null if index doesn't exist (caller already threw) or type unknown.
+     */
+    protected function getIndexPartType(string $column): ?string
+    {
+        $client = $this->connection->getTarantoolClient();
+        $escapedTable = addslashes($this->table);
+
+        if ($column === $this->primaryKey) {
+            // Primary index name is 'primary' in Tarantool, not the field name.
+            $info = $client->evaluate("local idx = box.space['{$escapedTable}'].index['primary']; if idx == nil then return nil end; return idx.parts[1].type");
+            $type = is_array($info) ? ($info[0] ?? null) : $info;
+            return is_string($type) ? $type : null;
+        }
+
+        $escapedColumn = addslashes($column);
+        $info = $client->evaluate("local idx = box.space['{$escapedTable}'].index['{$escapedColumn}']; if idx == nil then return nil end; return idx.parts[1].type");
+        $type = is_array($info) ? ($info[0] ?? null) : $info;
+
+        return is_string($type) ? $type : null;
+    }
+
+    /**
+     * STRICT type check: don't let Tarantool give cryptic "expected unsigned".
+     * If index is unsigned/integer and value is string, throw with clear message.
+     * Builder will NOT coerce "123" -> 123 silently in get().
+     */
+    protected function assertKeyType(string $column, mixed $value): void
+    {
+        if (! is_string($value) && ! is_int($value)) {
+            return;
+        }
+
+        $type = $this->getIndexPartType($column);
+        if ($type === null) {
+            return;
+        }
+
+        $isUnsigned = in_array($type, ['unsigned', 'integer'], true);
+        $isString = in_array($type, ['string'], true);
+
+        if ($isUnsigned && is_string($value)) {
+            throw new \InvalidArgumentException(
+                "Tarantool strict standard enforced: Field '{$column}' on '{$this->table}' expects {$type} int, got string '{$value}'. " .
+                "Cast to (int) before where(): where(['{$column}' => (int) \$value]). " .
+                "Builder will not coerce string -> int."
+            );
+        }
+
+        if ($isString && is_int($value)) {
+            throw new \InvalidArgumentException(
+                "Tarantool strict standard enforced: Field '{$column}' on '{$this->table}' expects string, got int {$value}. " .
+                "Cast to (string) before where(): where(['{$column}' => (string) \$value])."
+            );
+        }
+    }
+
+    /**
      * Execute the query and return matching rows.
      * If call() was used: runs procedure with 1 map, returns Collection.
      * Otherwise: $space->select() with single index condition.
+     * - Exact (=): default limit 1
+     * - Range (>, >=, <, <=): default limit 1000, use limit() to control
+     * - Array value [1,4,10]: STILL BLOCKED, that's an IN list, not a range
+     * - limit()/take() + offset()/skip() + orderBy() work for both normal and call() paths,
+     *   except mismatched 4 with slicing: > + desc, >= + desc, < + asc, <= + asc + limit()/offset() throws.
      */
     public function get($columns = ['*'])
     {
@@ -190,14 +357,38 @@ class Builder
                 );
             }
 
-            $params = [];
             foreach ($this->wheres as $column => $cond) {
-                $params[$column] = is_array($cond) ? $cond['value'] : $cond;
+                $value = is_array($cond) ? $cond['value'] : $cond;
+                $operator = is_array($cond) ? ($cond['operator'] ?? '=') : '=';
+                // Range: send ['>=' => 300], so Lua check_value() sees the operator.
+                // Exact: send scalar. Array param like declined_ids=[5,6]: send array as-is.
+                $params[$column] = $operator !== '=' ? [$operator => $value] : $value;
+            }
+
+            // Enable limit()/take() + offset()/skip() + orderBy() for call()->where()->get()
+            // Appended to the SAME 1 map, not as extra args.
+            // Lua ignores limit/offset/order_by if not implemented, so safe to always send.
+            // where() wins if you already put limit/offset/order_by in where().
+            // Only inject if set - don't force a default, procedure does its own limiting.
+            // first() already set limit = 1 before calling get(), so first() injects limit = 1.
+            if (!isset($params['limit']) && $this->limit !== null) {
+                $params['limit'] = $this->limit;
+            }
+            if (!isset($params['offset']) && $this->offset !== null) {
+                $params['offset'] = $this->offset;
+            }
+            if ($this->orderBy !== null) {
+                if (!isset($params['order_by'])) {
+                    $params['order_by'] = $this->orderBy;
+                }
+                if (!isset($params['order_dir'])) {
+                    $params['order_dir'] = $this->orderDirection;
+                }
             }
 
             $client = $this->connection->getTarantoolClient();
-            // 1 map: where() map
-            // $client->call('find_closest', ['latitude'=>...])
+            // 1 map: where() map + limit/offset/order_by if set
+            // $client->call('find_closest', ['latitude'=>..., 'limit'=>1])
             // Lua: function(params)
             $response = $client->call($this->procedure, $params);
 
@@ -214,59 +405,133 @@ class Builder
             return collect($mapped);
         }
 
-        // Normal select path
+        // Normal select path - STRICT, no unbounded, no fallback
+        if (empty($this->wheres)) {
+            throw new \RuntimeException(
+                "Tarantool strict standard enforced: Unbounded select is strictly prohibited. " .
+                "You must specify where() with an indexed column, or use a procedure: " .
+                "Model::call('procedure')->where([])->first(). " .
+                "Tried: ->get() with no where()"
+            );
+        }
+
         $space = $this->connection->getTarantoolClient()->getSpace($this->table);
         $rows = [];
 
-        if (!empty($this->wheres)) {
-            // Hard architectural defense: strictly forbid multi-criteria queries
-            if (count($this->wheres) > 1) {
+        // Hard architectural defense: strictly forbid multi-criteria queries
+        if (count($this->wheres) > 1) {
+            throw new \RuntimeException(
+                "Tarantool strict standard enforced: Multiple where conditions or chained criteria are strictly prohibited. " .
+                "A query must target a single index/key condition."
+            );
+        }
+
+        $column = array_key_first($this->wheres);
+        $condition = $this->wheres[$column];
+        
+        // Extract value and operator safely
+        $value = is_array($condition) ? $condition['value'] : $condition;
+        $operator = is_array($condition) ? $condition['operator'] : '=';
+
+        // STILL BLOCKED: array value like [1,4,10] is a non-contiguous IN list.
+        // Tarantool select key [1,4,10] is a composite key, not IN.
+        // Use range operator or procedure instead.
+        if (is_array($value)) {
+            throw new \RuntimeException(
+                "Tarantool strict standard enforced: Multi-ID / array-based lookups are strictly prohibited to prevent non-contiguous iteration. " .
+                "Tried: where(['{$column}' => [1,4,10]]). Use range: where(['{$column}' => ['>=' => \$from]]) or a procedure."
+            );
+        }
+
+        // STRICT: No fallback. If index doesn't exist, throw here, not in Tarantool.
+        $this->assertIndexExists($column);
+        $this->assertKeyType($column, $value);
+
+        // STRICT ORDERING: orderBy must be same index as where() for normal select.
+        // Tarantool can only order by the index used for select.
+        if ($this->orderBy !== null && $this->orderBy !== $column) {
+            throw new \RuntimeException(
+                "Tarantool strict standard enforced: orderBy('{$this->orderBy}') must match where() index '{$column}' on '{$this->table}'. " .
+                "Tarantool can only order by the index used for select. " .
+                "Use a procedure if you need to order by a different field: " .
+                "Model::call('procedure')->where([...])->orderBy('{$this->orderBy}', '{$this->orderDirection}')->get()."
+            );
+        }
+
+        $isPrimary = ($column === $this->primaryKey);
+
+        // Initialize criteria base - strictly on the requested index
+        $criteria = $isPrimary 
+            ? Criteria::key([$value]) 
+            : Criteria::index($column)->andKey([$value]);
+
+        // MISMATCHED 4: filter is right, order is wrong in Tarantool.
+        // Tarantool only has EQ, REQ, GT, GE, LT, LE. GT/GE are asc, LT/LE are desc.
+        // > + desc, >= + desc, < + asc, <= + asc have no single iterator for both filter and order.
+        // For those 4: fetch all with filter iterator, array_reverse() in PHP, return all.
+        // Slicing those 4 with explicit limit()/offset() is unsupported and throws,
+        // because offset would skip from the wrong end. first() is allowed, it sets limit = 1 internally.
+        $needsReverse = (
+            ($operator === '>' && $this->orderDirection === 'desc') ||
+            ($operator === '>=' && $this->orderDirection === 'desc') ||
+            ($operator === '<' && $this->orderDirection === 'asc') ||
+            ($operator === '<=' && $this->orderDirection === 'asc')
+        );
+
+        if ($needsReverse) {
+            if ($this->hasExplicitLimit || $this->hasExplicitOffset) {
                 throw new \RuntimeException(
-                    "Tarantool strict standard enforced: Multiple where conditions or chained criteria are strictly prohibited. " .
-                    "A query must target a single index/key condition."
+                    "Tarantool strict standard enforced: {$operator} + {$this->orderDirection} with limit()/offset() is unsupported to slice. " .
+                    "Tarantool iterator gives correct rows but wrong order, and offset would skip from the wrong end. " .
+                    "Fetch all without limit/offset and slice in PHP, or use a procedure: " .
+                    "Model::call('procedure')->where(['{$column}' => ['{$operator}' => \$value]])->orderBy('{$column}', '{$this->orderDirection}')->get()."
                 );
             }
 
-            $column = array_key_first($this->wheres);
-            $condition = $this->wheres[$column];
-            
-            // Extract value and operator safely
-            $value = is_array($condition) ? $condition['value'] : $condition;
-            $operator = is_array($condition) ? $condition['operator'] : '=';
-
-            // Intentional error stays here: select cannot do non-contiguous array lookup
-            // space:select can do bulk, but only consecutive via index, not random list [1,5,9]
-            if (is_array($value)) {
-                throw new \RuntimeException(
-                    "Tarantool strict standard enforced: Multi-ID / array-based lookups are strictly prohibited to prevent non-contiguous iteration."
-                );
-            }
-
-            $indexPos = array_search($column, $this->schema, true);
-            $isPrimary = ($column === $this->primaryKey || ($indexPos !== false && $indexPos === 0));
-
-            // Initialize criteria base
-            $criteria = $isPrimary 
-                ? Criteria::key([$value]) 
-                : Criteria::index($column)->andKey([$value]);
-
-            // Apply iterator modifier based on operator
-            $criteria = match ($operator) {
+            $reverseCriteria = match ($operator) {
                 '>'  => $criteria->andGtIterator(),
                 '>=' => $criteria->andGeIterator(),
                 '<'  => $criteria->andLtIterator(),
                 '<=' => $criteria->andLeIterator(),
-                default => $criteria, // EQ is default
             };
-        } else {
-            $criteria = Criteria::allIterator();
+            $reverseCriteria = $reverseCriteria->andLimit(1000);
+
+            $result = $space->select($reverseCriteria);
+
+            $reversed = [];
+            foreach ($result as $tuple) {
+                $reversed[] = $this->tupleToRow((array) $tuple);
+            }
+
+            return array_reverse($reversed);
         }
 
-        // Apply limit safety cap (default to 1 if unspecified to prevent accidental flooding)
-        $effectiveLimit = $this->limit ?? 1;
+        // DIRECT 6: single select gives correct filter and correct order.
+        // = + asc = EQ, = + desc = REQ
+        // > + asc = GT, >= + asc = GE
+        // < + desc = LT, <= + desc = LE
+        if ($this->orderDirection === 'desc') {
+            $criteria = match ($operator) {
+                '<'  => $criteria->andLtIterator(),
+                '<=' => $criteria->andLeIterator(),
+                default => $criteria->andReqIterator(),
+            };
+        } else {
+            $criteria = match ($operator) {
+                '>'  => $criteria->andGtIterator(),
+                '>=' => $criteria->andGeIterator(),
+                default => $criteria,
+            };
+        }
+
+        // Limit: exact = 1 by default (first() safety), range = 1000 by default
+        // first() already set limit = 1 before calling get(), so first() + range still returns 1.
+        $isRange = in_array($operator, ['>', '>=', '<', '<='], true);
+        $effectiveLimit = $this->limit ?? ($isRange ? 1000 : 1);
         $criteria = $criteria->andLimit($effectiveLimit);
 
-        // Apply offset if specified
+        // Apply offset if specified - works with both asc and desc because
+        // offset is applied on the (possibly reversed) iterator server-side.
         if ($this->offset !== null) {
             $criteria = $criteria->andOffset($this->offset);
         }
@@ -286,6 +551,8 @@ class Builder
      * Model::call('find_closest')->where([...])->first()
      * Model::on('tarantool')->call('find_closest')->where([...])->first()
      */
+
+    # TODO: can remove schema introspection error?
     public function call(string $procedure)
     {
         if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $procedure)) {
@@ -414,21 +681,44 @@ class Builder
 
             $searchParams = [];
             foreach ($this->wheres as $column => $cond) {
-                $searchParams[$column] = is_array($cond) ? $cond['value'] : $cond;
+                $value = is_array($cond) ? $cond['value'] : $cond;
+                $operator = is_array($cond) ? ($cond['operator'] ?? '=') : '=';
+                $searchParams[$column] = $operator !== '=' ? [$operator => $value] : $value;
             }
 
             $client = $this->connection->getTarantoolClient();
-            // 2 maps: where() map + update() map
-            // $client->call('assign_closest', ['latitude'=>...], ['status'=>'assigned'])
-            // Lua: function(search, updates)
             $response = $client->call($this->procedure, $searchParams, $values);
 
             if (!is_array($response) || $response === []) {
-                return null;
+                return null; // not found, allowed
             }
 
-            $row = array_is_list($response) ? $response[0] : $response;
-            if (!is_array($row)) return $row;
+            // Must be just the map: [map] or map
+            $row = array_is_list($response) ? ($response[0] ?? null) : $response;
+
+            if ($row === null) {
+                return null;
+            }
+            if (!is_array($row)) {
+                throw new \RuntimeException(
+                    "Stored procedure '{$this->procedure}' must return just the map, e.g. {id=1, name='James', status='inactive'}. " .
+                    "Got non-array return."
+                );
+            }
+            if (array_is_list($row)) {
+                throw new \RuntimeException(
+                    "Stored procedure '{$this->procedure}' must return just the map, not a tuple. " .
+                    "Do: return {id = updated[1], name = updated[2], status = updated[3]}. " .
+                    "Do not: return space:update(...)"
+                );
+            }
+            if (count($response) > 1 && array_is_list($response)) {
+                throw new \RuntimeException(
+                    "Stored procedure '{$this->procedure}' must return just the map, not multiple rows. " .
+                    "Update returns 1 record."
+                );
+            }
+
             return new ReadOnlyRecord($row);
         }
 
@@ -549,7 +839,11 @@ class Builder
 
             $params = [];
             foreach ($this->wheres as $column => $cond) {
-                $params[$column] = is_array($cond) ? $cond['value'] : $cond;
+                $value = is_array($cond) ? $cond['value'] : $cond;
+                $operator = is_array($cond) ? ($cond['operator'] ?? '=') : '=';
+                // Range: send ['>=' => 300], so Lua check_value() sees the operator.
+                // Exact: send scalar. Array param like declined_ids=[5,6]: send array as-is.
+                $params[$column] = $operator !== '=' ? [$operator => $value] : $value;
             }
 
             $client = $this->connection->getTarantoolClient();

@@ -76,7 +76,8 @@ test('it handles limit correctly with contiguous primary IDs', function () {
     TestUser::create(['id' => 103, 'name' => 'User Three', 'email' => 'three@test.org']);
 
     // Query with a limit to fetch a subset of contiguous records from the primary index
-    $users = TestUser::limit(2)->get();
+    // >= + asc is direct, limit works. limit() with no where() is unbounded and throws.
+    $users = TestUser::where(['id' => ['>=' => 101]])->limit(2)->get();
 
     expect($users)->toBeArray();
     expect(count($users))->toBe(2);
@@ -91,9 +92,7 @@ test('it handles offset correctly for pagination and skipping', function () {
     TestUser::create(['id' => 203, 'name' => 'Page Three', 'email' => 'p3@test.org']);
 
     // Skip the first record and take the next 2
-    $users = TestUser::offset(1)
-        ->limit(2)
-        ->get();
+    $users = TestUser::where(['id' => ['>=' => 101]])->limit(2)->offset(1)->get();
 
     expect($users)->toBeArray();
     expect(count($users))->toBe(2);
@@ -108,7 +107,7 @@ test('it handles limit seamlessly when resulting primary IDs are non-contiguous'
     TestUser::create(['id' => 1500, 'name' => 'Third Non-Contig', 'email' => 'nc3@test.org']);
 
     // Query with a limit (Tarantool iterates the primary index sequentially)
-    $users = TestUser::limit(2)->get();
+    $users = TestUser::where(['id' => ['>=' => 101]])->limit(2)->get();
 
     expect($users)->toBeArray();
     expect(count($users))->toBe(2);
@@ -145,6 +144,7 @@ test('it can query records using less than or equal operator (upper boundary inc
 
     // id <= 702 scans backward: returns 702 (boundary), then 701
     $results = TestUser::where(['id' => ['<=' => 702]])
+        ->orderBy('id', 'desc')
         ->limit(10)
         ->get();
 

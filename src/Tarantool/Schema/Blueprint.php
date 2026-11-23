@@ -81,6 +81,8 @@ class Blueprint
     public function bigInteger(string $column): self { return $this->integer($column); }
     public function unsignedBigInteger(string $column): self { return $this->unsignedInteger($column); }
 
+    public function unsigned(string $column): self { return $this->unsignedInteger($column); }
+
     public function decimal(string $column, int $total = 8, int $places = 2): self
     {
         $this->columns[] = ['name' => $column, 'type' => 'decimal', 'is_nullable' => false];

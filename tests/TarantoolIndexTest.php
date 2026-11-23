@@ -107,5 +107,5 @@ test('it throws an error when querying a column without a defined Tarantool inde
     ]);
 
     expect(fn () => TestIndexedCustomer::where(['name' => 'Marcus Wright'])->first())
-        ->toThrow(RequestFailed::class, "No index 'name' is defined");
+        ->toThrow(RuntimeException::class, "No index 'name'");
 });
